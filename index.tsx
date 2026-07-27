@@ -2,6 +2,10 @@
  * Vencord, a Discord client mod
  * Copyright (c) 2024 Vendicated and contributors
  * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * Quest completer — merged from:
+ *   RAD4R911/RAD4Rquestcompleter (plugin scaffold, auto-accept, queue logic)
+ *   aamiaa/CompleteDiscordQuest   (working store detection as of 2026)
  */
 
 import { definePluginSettings } from "@api/Settings";
@@ -24,6 +28,7 @@ const settings = definePluginSettings({
 
 const SUPPORTED_TASKS = ["WATCH_VIDEO", "PLAY_ON_DESKTOP", "STREAM_ON_DESKTOP", "PLAY_ACTIVITY", "WATCH_VIDEO_ON_MOBILE"];
 
+// Stores — populated by initStores()
 let ApplicationStreamingStore: any;
 let RunningGameStore: any;
 let QuestsStore: any;
@@ -44,7 +49,7 @@ const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 function log(...args: any[]) {
     if (settings.store.logProgress) {
-        console.log("[RAD4Rquestcompleter]", ...args);
+        console.log("[QuestCompleter]", ...args);
     }
 }
 
@@ -67,38 +72,47 @@ function isCompleted(quest: any): boolean {
     return !!quest.userStatus?.completedAt;
 }
 
+// ---------------------------------------------------------------------------
+// Store detection — uses aamiaa's current export paths (A / Ay / Bo / h)
+// with fallback to the older Z / ZP / tn paths for older client builds.
+// ---------------------------------------------------------------------------
+function getWpRequire(): any {
+    const wpRequire = (window as any).webpackChunkdiscord_app.push([[Symbol()], {}, (r: any) => r]);
+    (window as any).webpackChunkdiscord_app.pop();
+    return wpRequire;
+}
+
 function initStores(): boolean {
     if (initialized) return true;
-
     try {
-        const wpRequire = (window as any).webpackChunkdiscord_app.push([[Symbol()], {}, (r: any) => r]);
-        (window as any).webpackChunkdiscord_app.pop();
+        const c = Object.values(getWpRequire().c) as any[];
 
-        ApplicationStreamingStore = Object.values(wpRequire.c).find((x: any) =>
-            x?.exports?.Z?.__proto__?.getStreamerActiveStreamMetadata
-        )?.exports?.Z;
+        // aamiaa's current paths (primary)
+        ApplicationStreamingStore =
+            c.find(x => x?.exports?.A?.__proto__?.getStreamerActiveStreamMetadata)?.exports?.A;
 
-        if (!ApplicationStreamingStore) {
-            ApplicationStreamingStore = Object.values(wpRequire.c).find((x: any) =>
-                x?.exports?.A?.__proto__?.getStreamerActiveStreamMetadata
-            )?.exports?.A;
-            RunningGameStore  = Object.values(wpRequire.c).find((x: any) => x?.exports?.Ay?.getRunningGames)?.exports?.Ay;
-            QuestsStore       = Object.values(wpRequire.c).find((x: any) => x?.exports?.A?.__proto__?.getQuest)?.exports?.A;
-            ChannelStore      = Object.values(wpRequire.c).find((x: any) => x?.exports?.A?.__proto__?.getAllThreadsForParent)?.exports?.A;
-            GuildChannelStore = Object.values(wpRequire.c).find((x: any) => x?.exports?.Ay?.getSFWDefaultChannel)?.exports?.Ay;
-            FluxDispatcher    = Object.values(wpRequire.c).find((x: any) => x?.exports?.h?.__proto__?.flushWaitQueue)?.exports?.h;
-            api               = Object.values(wpRequire.c).find((x: any) => x?.exports?.Bo?.get)?.exports?.Bo;
+        if (ApplicationStreamingStore) {
+            // Current export shape
+            RunningGameStore  = c.find(x => x?.exports?.Ay?.getRunningGames)?.exports?.Ay;
+            QuestsStore       = c.find(x => x?.exports?.A?.__proto__?.getQuest)?.exports?.A;
+            ChannelStore      = c.find(x => x?.exports?.A?.__proto__?.getAllThreadsForParent)?.exports?.A;
+            GuildChannelStore = c.find(x => x?.exports?.Ay?.getSFWDefaultChannel)?.exports?.Ay;
+            FluxDispatcher    = c.find(x => x?.exports?.h?.__proto__?.flushWaitQueue)?.exports?.h;
+            api               = c.find(x => x?.exports?.Bo?.get)?.exports?.Bo;
         } else {
-            RunningGameStore  = Object.values(wpRequire.c).find((x: any) => x?.exports?.ZP?.getRunningGames)?.exports?.ZP;
-            QuestsStore       = Object.values(wpRequire.c).find((x: any) => x?.exports?.Z?.__proto__?.getQuest)?.exports?.Z;
-            ChannelStore      = Object.values(wpRequire.c).find((x: any) => x?.exports?.Z?.__proto__?.getAllThreadsForParent)?.exports?.Z;
-            GuildChannelStore = Object.values(wpRequire.c).find((x: any) => x?.exports?.ZP?.getSFWDefaultChannel)?.exports?.ZP;
-            FluxDispatcher    = Object.values(wpRequire.c).find((x: any) => x?.exports?.Z?.__proto__?.flushWaitQueue)?.exports?.Z;
-            api               = Object.values(wpRequire.c).find((x: any) => x?.exports?.tn?.get)?.exports?.tn;
+            // Older / alternate export shape
+            ApplicationStreamingStore =
+                c.find(x => x?.exports?.Z?.__proto__?.getStreamerActiveStreamMetadata)?.exports?.Z;
+            RunningGameStore  = c.find(x => x?.exports?.ZP?.getRunningGames)?.exports?.ZP;
+            QuestsStore       = c.find(x => x?.exports?.Z?.__proto__?.getQuest)?.exports?.Z;
+            ChannelStore      = c.find(x => x?.exports?.Z?.__proto__?.getAllThreadsForParent)?.exports?.Z;
+            GuildChannelStore = c.find(x => x?.exports?.ZP?.getSFWDefaultChannel)?.exports?.ZP;
+            FluxDispatcher    = c.find(x => x?.exports?.Z?.__proto__?.flushWaitQueue)?.exports?.Z;
+            api               = c.find(x => x?.exports?.tn?.get)?.exports?.tn;
         }
 
         if (!QuestsStore || !FluxDispatcher || !api) {
-            console.error("[RAD4Rquestcompleter] Failed to find required stores");
+            console.error("[QuestCompleter] Failed to find required stores — Discord may have updated its bundles.");
             return false;
         }
 
@@ -107,11 +121,14 @@ function initStores(): boolean {
         log("Stores initialized, isApp =", isApp);
         return true;
     } catch (e) {
-        console.error("[RAD4Rquestcompleter] Init failed:", e);
+        console.error("[QuestCompleter] Init failed:", e);
         return false;
     }
 }
 
+// ---------------------------------------------------------------------------
+// Quest enrollment
+// ---------------------------------------------------------------------------
 async function enrollQuest(quest: any): Promise<boolean> {
     const name = quest.config.messages.questName;
     const MAX_RETRIES = 3;
@@ -138,7 +155,6 @@ async function enrollQuest(quest: any): Promise<boolean> {
 
             log(`Auto-accepted: ${name}`);
             return true;
-
         } catch (e: any) {
             const status: number = e?.status ?? e?.res?.status ?? 0;
             const body: any      = e?.body   ?? e?.res?.body   ?? {};
@@ -181,6 +197,9 @@ async function autoAcceptAvailableQuests(): Promise<boolean> {
     return enrolledAny;
 }
 
+// ---------------------------------------------------------------------------
+// Queue management
+// ---------------------------------------------------------------------------
 function syncQueueFromStore() {
     if (!QuestsStore?.quests) return;
 
@@ -242,6 +261,9 @@ function startSession() {
     }, 2000);
 }
 
+// ---------------------------------------------------------------------------
+// Core completion logic — adapted from aamiaa's gist (video wait fix included)
+// ---------------------------------------------------------------------------
 function doJob() {
     const quest = questQueue.shift();
     if (!quest) {
@@ -261,29 +283,30 @@ function doJob() {
     const secondsNeeded   = taskConfig.tasks[taskName].target;
     let secondsDone       = quest.userStatus?.progress?.[taskName]?.value ?? 0;
 
+    // -- WATCH_VIDEO / WATCH_VIDEO_ON_MOBILE --------------------------------
+    // Uses aamiaa's timing: wait `remaining` seconds before each post so the
+    // timestamp is always believable to Discord's server-side checks.
     if (taskName === "WATCH_VIDEO" || taskName === "WATCH_VIDEO_ON_MOBILE") {
-        const maxFuture = 10, speed = 7, interval = 1;
-        const enrolledAt = new Date(quest.userStatus.enrolledAt).getTime();
+        const speed = 7;
         let completed = false;
 
         (async () => {
             try {
                 while (true) {
-                    const maxAllowed = Math.floor((Date.now() - enrolledAt) / 1000) + maxFuture;
-                    const diff = maxAllowed - secondsDone;
-                    const timestamp = secondsDone + speed;
+                    const remaining = Math.min(speed, secondsNeeded - secondsDone);
+                    await sleep(remaining * 1000);
 
-                    if (diff >= speed) {
-                        const res = await api.post({
-                            url: `/quests/${quest.id}/video-progress`,
-                            body: { timestamp: Math.min(secondsNeeded, timestamp + Math.random()) }
-                        });
-                        completed = res.body.completed_at != null;
-                        secondsDone = Math.min(secondsNeeded, timestamp);
-                    }
+                    const timestamp = secondsDone + speed;
+                    const res = await api.post({
+                        url: `/quests/${quest.id}/video-progress`,
+                        body: { timestamp: Math.min(secondsNeeded, timestamp + Math.random()) }
+                    });
+                    completed = res.body.completed_at != null;
+                    secondsDone = Math.min(secondsNeeded, timestamp);
+
+                    log(`[${questName}] Video progress: ${secondsDone}/${secondsNeeded}`);
 
                     if (timestamp >= secondsNeeded) break;
-                    await sleep(interval * 1000);
                 }
 
                 if (!completed) {
@@ -302,6 +325,7 @@ function doJob() {
 
         log(`Spoofing video: ${questName}`);
 
+    // -- PLAY_ON_DESKTOP ----------------------------------------------------
     } else if (taskName === "PLAY_ON_DESKTOP") {
         if (!isApp) {
             log(`${questName} requires the desktop app – skipping`);
@@ -314,27 +338,27 @@ function doJob() {
                 const appData = res.body?.[0];
 
                 if (!appData) {
-                    log(`No app data returned for "${questName}" – skipping`);
+                    log(`No app data for "${questName}" – skipping`);
                     doJob();
                     return;
                 }
 
-                const win32Exe = appData.executables?.find((x: any) => x.os === "win32");
-                const anyExe   = appData.executables?.[0];
-                const exeName  = (win32Exe ?? anyExe)?.name?.replace(">", "") ?? `${appData.name}.exe`;
+                const exeName =
+                    appData.executables?.find((x: any) => x.os === "win32")?.name?.replace(">", "") ??
+                    appData.name.replace(/[\/\\:*?"<>|]/g, "");
 
                 const fakeGame = {
-                    cmdLine: `C:\\Program Files\\${appData.name}\\${exeName}`,
+                    cmdLine:     `C:\\Program Files\\${appData.name}\\${exeName}`,
                     exeName,
-                    exePath: `c:/program files/${appData.name.toLowerCase()}/${exeName}`,
-                    hidden: false,
-                    isLauncher: false,
-                    id: applicationId,
-                    name: appData.name,
+                    exePath:     `c:/program files/${appData.name.toLowerCase()}/${exeName}`,
+                    hidden:      false,
+                    isLauncher:  false,
+                    id:          applicationId,
+                    name:        appData.name,
                     pid,
-                    pidPath: [pid],
+                    pidPath:     [pid],
                     processName: appData.name,
-                    start: Date.now(),
+                    start:       Date.now(),
                 };
 
                 const realGames           = RunningGameStore.getRunningGames();
@@ -366,7 +390,7 @@ function doJob() {
                             doJob();
                         }
                     } catch (e) {
-                        log(`Error in heartbeat handler for "${questName}":`, e);
+                        log(`Error in heartbeat for "${questName}":`, e);
                         cleanup();
                         doJob();
                     }
@@ -380,6 +404,7 @@ function doJob() {
                 doJob();
             });
 
+    // -- STREAM_ON_DESKTOP --------------------------------------------------
     } else if (taskName === "STREAM_ON_DESKTOP") {
         if (!isApp) {
             log(`${questName} requires the desktop app – skipping`);
@@ -414,7 +439,7 @@ function doJob() {
                     doJob();
                 }
             } catch (e) {
-                log(`Error in heartbeat handler for "${questName}":`, e);
+                log(`Error in heartbeat for "${questName}":`, e);
                 cleanup();
                 doJob();
             }
@@ -423,6 +448,7 @@ function doJob() {
         FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
         log(`Spoofed stream: ${applicationName} – ~${Math.ceil((secondsNeeded - secondsDone) / 60)} min left (need 1+ in VC)`);
 
+    // -- PLAY_ACTIVITY ------------------------------------------------------
     } else if (taskName === "PLAY_ACTIVITY") {
         const channelId =
             ChannelStore.getSortedPrivateChannels()[0]?.id ??
@@ -467,29 +493,32 @@ function doJob() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Plugin entry point
+// ---------------------------------------------------------------------------
 export default definePlugin({
-    name: "RAD4Rquestcompleter",
-    description: "Automatically completes Discord quests with auto-accept and progress automation.",
+    name: "QuestCompleter",
+    description: "Automatically completes Discord quests. Auto-accepts and runs all supported task types.",
     authors: [{ name: "RAD4R", id: 755936860932669541n }],
     settings,
 
     start() {
         log("Starting...");
 
+        // Bootstrap FluxDispatcher early so we can subscribe before full init
         const bootstrapFlux = (): any => {
             try {
-                const wpRequire = (window as any).webpackChunkdiscord_app.push([[Symbol()], {}, (r: any) => r]);
-                (window as any).webpackChunkdiscord_app.pop();
+                const c = Object.values(getWpRequire().c) as any[];
                 return (
-                    Object.values(wpRequire.c).find((x: any) => x?.exports?.Z?.__proto__?.flushWaitQueue)?.exports?.Z ??
-                    Object.values(wpRequire.c).find((x: any) => x?.exports?.h?.__proto__?.flushWaitQueue)?.exports?.h
+                    c.find(x => x?.exports?.h?.__proto__?.flushWaitQueue)?.exports?.h ??
+                    c.find(x => x?.exports?.Z?.__proto__?.flushWaitQueue)?.exports?.Z
                 );
             } catch { return null; }
         };
 
         const earlyFlux = bootstrapFlux();
         if (!earlyFlux) {
-            console.error("[RAD4Rquestcompleter] Could not bootstrap FluxDispatcher");
+            console.error("[QuestCompleter] Could not bootstrap FluxDispatcher");
             return;
         }
 
